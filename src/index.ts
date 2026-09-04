@@ -20,6 +20,7 @@ dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
+const lastEmojiAt = new Map<string, number>(); // socketId -> timestamp, for basic emoji spam guard
 const io = new Server(httpServer, {
   cors: { origin: process.env.CLIENT_URL || "http://localhost:3000", methods: ["GET","POST"] },
 });
@@ -185,6 +186,26 @@ io.on("connection", (socket: Socket) => {
     }
   });
 
+  // ── EMOJI REACTION ────────────────────────────────────────
+  socket.on("emoji", (payload: { roomId: string; emoji: string }) => {
+    const room = getRoom(payload.roomId);
+    if (!room) return;
+    const roomPlayer = room.players.find(p => p.socketId === socket.id);
+    if (!roomPlayer) return;
+
+    // Basic spam guard: max 1 emoji per 400ms per socket
+    const now = Date.now();
+    const last = lastEmojiAt.get(socket.id) ?? 0;
+    if (now - last < 400) return;
+    lastEmojiAt.set(socket.id, now);
+
+    // Only allow known short emoji strings to avoid arbitrary payload abuse
+    const ALLOWED_EMOJIS = ["👍", "😂", "😡", "😮", "🔥", "👋"];
+    if (!ALLOWED_EMOJIS.includes(payload.emoji)) return;
+
+    io.to(payload.roomId).emit("emoji", { color: roomPlayer.color, emoji: payload.emoji });
+  });
+
   // ── RECONNECT ─────────────────────────────────────────────
   socket.on("reconnect", (payload: ReconnectPayload) => {
     const room = getRoom(payload.roomId);
@@ -200,6 +221,7 @@ io.on("connection", (socket: Socket) => {
 
   // ── DISCONNECT ────────────────────────────────────────────
   socket.on("disconnect", () => {
+    lastEmojiAt.delete(socket.id);
     const room = setDisconnected(socket.id);
     if (room) {
       io.to(room.id).emit("playerDisconnected", { players: room.players });
